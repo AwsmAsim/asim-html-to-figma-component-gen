@@ -1,0 +1,29 @@
+# Python virtual environment
+venv/
+env/
+.env/
+.venv/
+
+# Node modules and package files
+node_modules/
+package-lock.json
+yarn.lock
+
+# Figma plugin build
+html-to-figma-generator/
+dist/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE specific files
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Output files
+output_files/
+*.log
