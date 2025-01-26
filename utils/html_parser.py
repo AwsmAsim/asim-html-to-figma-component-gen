@@ -28,6 +28,8 @@ class HTMLParser:
         self.color_regex = re.compile(
             r'^#([a-fA-F0-9]{3,4}|[a-fA-F0-9]{6}|[a-fA-F0-9]{8})$|^rgb(a?)\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)$'
         )
+        self.font_size_regex = re.compile(r'^text-(xs|sm|base|lg|xl|2xl|3xl|4xl|5xl|6xl)$')
+        self.dimension_regex = re.compile(r'^([wh])-(\d+)$')
 
     def parse(self, html: str) -> HTMLNode:
         soup = BeautifulSoup(html, 'html.parser')
@@ -48,6 +50,62 @@ class HTMLParser:
             self.framework = 'tailwind'
             return
 
+    def _process_image_dimensions(self, html_node: HTMLNode):
+        """
+        Process dimension-related classes for both Tailwind and Bootstrap.
+        Handles classes like:
+        - Tailwind: w-24, h-40, w-full, h-screen
+        - Bootstrap: w-25, h-50, w-100, h-100
+        """
+        if html_node.tag != 'img':
+            return  # Only process dimensions for image nodes
+
+        # Mapping for special dimension classes (Tailwind and Bootstrap)
+        dimension_classes = {
+            # Tailwind
+            'w-full': '100%',
+            'w-screen': '100vw',
+            'h-full': '100%',
+            'h-screen': '100vh',
+            # Bootstrap
+            'w-100': '100%',
+            'h-100': '100%',
+        }
+
+        # Process numeric width/height classes
+        for cls in html_node.classes:
+            if cls.startswith(('w-', 'h-')):
+                try:
+                    # Extract the numeric value from the class
+                    value = int(cls.split('-')[1])
+                    # Determine the framework and convert to pixels
+                    if self.framework == 'tailwind':
+                        # Tailwind: 1 unit = 4px
+                        pixels = value * 4
+                    elif self.framework == 'bootstrap':
+                        # Bootstrap: w-25 = 25%, w-50 = 50%, etc.
+                        pixels = f"{value}%"
+                    else:
+                        # Default to Tailwind behavior if framework is not detected
+                        pixels = value * 4
+
+                    # Set the dimension in figma_styles
+                    if cls.startswith('w-'):
+                        html_node.figma_styles['width'] = pixels
+                    elif cls.startswith('h-'):
+                        html_node.figma_styles['height'] = pixels
+                except (IndexError, ValueError):
+                    # Skip invalid or non-numeric classes (e.g., w-auto)
+                    continue
+
+        # Handle special classes (e.g., w-full, w-100)
+        for cls in html_node.classes:
+            if cls in dimension_classes:
+                if cls.startswith('w-'):
+                    html_node.figma_styles['width'] = dimension_classes[cls]
+                elif cls.startswith('h-'):
+                    html_node.figma_styles['height'] = dimension_classes[cls]
+
     def _parse_node(self, node: Tag) -> HTMLNode:
         html_node = HTMLNode(
             tag=node.name,
@@ -56,15 +114,33 @@ class HTMLParser:
             framework=self.framework
         )
 
+        # Handle text content
+        if node.string and node.string.strip():
+            html_node.text = node.string.strip()
+
+        # Handle images
+        if node.name == 'img':
+            self._process_image_node(html_node, node)
+
         # Handle inline styles
         if 'style' in node.attrs:
-            html_node.styles = self._parse_inline_styles(node['style'])
+            parsed_styles = self._parse_inline_styles(node['style'])
+            html_node.styles.update(parsed_styles)
+            self._apply_font_styles(html_node, parsed_styles)
+            self._apply_color_styles(html_node, parsed_styles)
+
+        self._process_text_color_classes(html_node)
+        self._process_image_dimensions(html_node)
 
         # Resolve framework-specific styles
         if self.framework == 'bootstrap':
             html_node.figma_styles = resolve_bootstrap_styles(html_node.classes)
         elif self.framework == 'tailwind':
             html_node.figma_styles = resolve_tailwind_styles(html_node.classes)
+
+        # Additional font style handling
+        self._process_font_classes(html_node)
+        self._process_dimension_classes(html_node)
 
         # Process child nodes
         for child in node.children:
@@ -74,6 +150,137 @@ class HTMLParser:
                 html_node.text = child.strip()
 
         return html_node
+
+    def _process_image_node(self, html_node: HTMLNode, node: Tag):
+        # Handle image source
+        if 'src' in node.attrs:
+            html_node.attributes['src'] = node['src']
+        
+        # Handle image dimensions
+        html_node.figma_styles.update({
+            'constraints': {'horizontal': 'SCALE', 'vertical': 'SCALE'},
+            'layoutMode': 'NONE'
+        })
+
+    def _process_font_classes(self, html_node: HTMLNode):
+        # Handle font-related classes
+        font_styles = {}
+        for cls in html_node.classes:
+            # Font weight
+            if cls.startswith('font-'):
+                weight = cls.split('-')[-1]
+                font_styles['fontWeight'] = {
+                    'light': 300,
+                    'normal': 400,
+                    'medium': 500,
+                    'semibold': 600,
+                    'bold': 700
+                }.get(weight, 400)
+            
+            # Font size
+            size_match = self.font_size_regex.match(cls)
+            if size_match:
+                sizes = {
+                    'xs': 12, 'sm': 14, 'base': 16, 'lg': 18,
+                    'xl': 20, '2xl': 24, '3xl': 30, '4xl': 36,
+                    '5xl': 48, '6xl': 60
+                }
+                font_styles['fontSize'] = sizes.get(size_match.group(1), 16)
+            
+            # Text alignment
+            if cls in ['text-left', 'text-center', 'text-right', 'text-justify']:
+                font_styles['textAlign'] = cls.split('-')[-1].upper()
+
+        html_node.figma_styles.update(font_styles)
+
+    def _process_dimension_classes(self, html_node: HTMLNode):
+        # Handle width/height classes
+        dimensions = {'w': 'width', 'h': 'height'}
+        for cls in html_node.classes:
+            match = self.dimension_regex.match(cls)
+            if match:
+                prop = dimensions[match.group(1)]
+                value = int(match.group(2)) * 4  # Convert tailwind units to pixels (1 = 4px)
+                html_node.figma_styles[prop] = value
+
+    def _apply_font_styles(self, html_node: HTMLNode, styles: dict):
+        # Map CSS font properties to Figma properties
+        font_mapping = {
+            'font-size': ('fontSize', lambda v: int(float(v.replace('px', '')))),
+            'font-weight': ('fontWeight', lambda v: int(v)),
+            'text-align': ('textAlign', lambda v: v.upper()),
+            'line-height': ('lineHeight', lambda v: {'unit': 'PIXELS', 'value': int(float(v.replace('px', '')))})
+        }
+
+        for css_prop, (figma_prop, converter) in font_mapping.items():
+            if css_prop in styles:
+                try:
+                    html_node.figma_styles[figma_prop] = converter(styles[css_prop])
+                except Exception as e:
+                    print(f"Error converting {css_prop}: {e}")
+
+    def _apply_color_styles(self, html_node: HTMLNode, styles: dict):
+        # Handle text and background colors
+        if 'color' in styles:
+            html_node.figma_styles.setdefault('fills', []).append({
+                'type': 'SOLID',
+                'color': self._normalize_color(styles['color'])
+            })
+        
+        if 'background-color' in styles:
+            html_node.figma_styles.setdefault('background', []).append({
+                'type': 'SOLID',
+                'color': self._normalize_color(styles['background-color'])
+            })
+
+    def _parse_inline_styles(self, style_str: str) -> Dict[str, str]:
+        """Parse inline CSS styles into a dictionary"""
+        sheet = cssutils.parseStyle(style_str)
+        return {prop.name: prop.value for prop in sheet}
+
+    def _process_text_color_classes(self, html_node: HTMLNode):
+        color_mapping = {
+            'text-textPrimary': {'r': 0.1, 'g': 0.1, 'b': 0.1},
+            'text-textSecondary': {'r': 0.4, 'g': 0.4, 'b': 0.4},
+            'text-primary': {'r': 0, 'g': 0.47, 'b': 1},  # Example primary color
+            'text-warning': {'r': 1, 'g': 0.8, 'b': 0}    # Example warning color
+        }
+        
+        for cls in html_node.classes:
+            if cls in color_mapping:
+                html_node.figma_styles.setdefault('fills', []).append({
+                    'type': 'SOLID',
+                    'color': color_mapping[cls]
+                })
+
+    def _process_image_node(self, html_node: HTMLNode, node: Tag):
+        # Handle image source
+        if 'src' in node.attrs:
+            html_node.attributes['src'] = node['src']
+            html_node.figma_styles['imageHash'] = self._get_image_hash(node['src'])
+        
+        # Handle image dimensions from classes
+        dimensions = {
+            'w-full': '100%',
+            'h-40': 160,  # 40 * 4 = 160px
+            'w-24': 96,   # 24 * 4 = 96px
+            'h-24': 96
+        }
+    
+        for cls in html_node.classes:
+            if cls in dimensions:
+                prop = 'width' if cls.startswith('w-') else 'height'
+                html_node.figma_styles[prop] = dimensions[cls]
+        
+        # Default constraints
+        html_node.figma_styles.update({
+            'constraints': {'horizontal': 'SCALE', 'vertical': 'SCALE'},
+            'layoutMode': 'NONE'
+        })
+
+    def _get_image_hash(self, url: str) -> str:
+        # Implement actual image fetching and hashing logic
+        return f"image-{hash(url)}"  # Simplified example
 
     def _get_attributes(self, node: Tag) -> Dict[str, str]:
         return {attr: node[attr] for attr in node.attrs if attr != 'class'}
